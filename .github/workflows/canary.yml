@@ -30,8 +30,6 @@ jobs:
 
     env:
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
-      _CL_: "/Z7"
-      _LINK_: "/DEBUG:FASTLINK"
 
     defaults:
       run:
@@ -41,7 +39,6 @@ jobs:
       - name: Free disk space on Windows Runner
         shell: pwsh
         run: |
-          # Free up ~25GB+ of disk space to avoid I/O bottlenecks and out-of-disk crashes
           Remove-Item -Recurse -Force "$env:ANDROID_HOME" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\ProgramData\Chocolatey" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Ruby" -ErrorAction SilentlyContinue
@@ -157,8 +154,7 @@ jobs:
 
       - name: Build Libraries
         run: |
-          set _CL_=/Z7
-          set _LINK_=/DEBUG:FASTLINK
+          set CL=/FS
           %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
 
       - name: Generate stub private headers
