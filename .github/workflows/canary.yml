@@ -36,13 +36,6 @@ jobs:
         shell: cmd
 
     steps:
-      - name: Free disk space on Windows Runner
-        shell: pwsh
-        run: |
-          Remove-Item -Recurse -Force "$env:ANDROID_HOME" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\ProgramData\Chocolatey" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows\Ruby" -ErrorAction SilentlyContinue
-
       - name: Prepare directories
         run: |
           mkdir %userprofile%\TBuild\Libraries
@@ -101,9 +94,7 @@ jobs:
           SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
           echo "SDK=$SDK" >> $GITHUB_ENV
 
-          # Inject /FS into CMake global configs so MSVC always writes PDB synchronously without crashing
-          CMAKE_MSVC_FILE="$PROGRAMFILES/CMake/share/cmake-"*"/Modules/Platform/Windows-MSVC.cmake"
-          sed -i 's/\/Zi/\/Zi \/FS/g' $CMAKE_MSVC_FILE
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
 
           echo "$(sha256sum "$TBUILD/tdesktop/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
