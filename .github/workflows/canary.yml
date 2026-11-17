@@ -3,10 +3,18 @@ name: Build Telegram Desktop (Windows x64)
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Branch or tag to fetch from upstream (tdesktop)'
+      source_repo:
+        description: 'Choose code source'
         required: true
-        default: 'dev'
+        type: choice
+        default: 'upstream'
+        options:
+          - 'upstream'
+          - 'current'
+      branch:
+        description: 'Branch or tag name (e.g. public-canary or main)'
+        required: true
+        default: 'public-canary'
 
 permissions:
   contents: write
@@ -36,10 +44,22 @@ jobs:
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
           echo REPO_NAME=tdesktop>>%GITHUB_ENV%
 
-      - name: Checkout upstream tdesktop repository
+      # Determine target repository based on user choice
+      - name: Resolve target repository
+        shell: bash
+        run: |
+          if [ "${{ github.event.inputs.source_repo }}" = "upstream" ]; then
+            echo "TARGET_REPO=telegramdesktop/tdesktop" >> $GITHUB_ENV
+            echo "Fetching latest changes from official tdesktop: ${{ github.event.inputs.branch }}"
+          else
+            echo "TARGET_REPO=${{ github.repository }}" >> $GITHUB_ENV
+            echo "Fetching changes from your own repository: ${{ github.event.inputs.branch }}"
+          fi
+
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          repository: telegramdesktop/tdesktop
+          repository: ${{ env.TARGET_REPO }}
           ref: ${{ github.event.inputs.branch }}
           path: ${{ env.TBUILD }}\tdesktop
           fetch-depth: 0
@@ -64,6 +84,7 @@ jobs:
           
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
           echo "version_str=$VERSION_STR" >> $GITHUB_OUTPUT
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION_STR ($TAG_NAME)"
 
       - name: Configure Git and calculate cache key
@@ -103,7 +124,7 @@ jobs:
           }
 
       - name: Native Tools Command Prompt
-        uses: Eden-CI/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
           sdk: ${{ env.SDK }}
@@ -169,7 +190,7 @@ jobs:
           touch TelegramPortable/TelegramForcePortable/.keep
           cp Telegram.exe TelegramPortable/
           
-          ARCHIVE_NAME="Telegram-Windows-x64-${{ steps.get_version.outputs.version_str }}.zip"
+          ARCHIVE_NAME="Telegram-Windows-x64-${{ steps.get_version.outputs.version_str }}-${{ steps.get_version.outputs.commit_hash }}.zip"
           7z a -mx9 "$ARCHIVE_NAME" TelegramPortable
           
           mkdir -p "$GITHUB_WORKSPACE/dist"
@@ -180,7 +201,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.tag_name }}
-          name: Telegram Desktop ${{ steps.get_version.outputs.version_str }}
+          name: Telegram Desktop ${{ steps.get_version.outputs.version_str }} (${{ steps.get_version.outputs.commit_hash }})
           draft: false
           prerelease: false
           generate_release_notes: true
