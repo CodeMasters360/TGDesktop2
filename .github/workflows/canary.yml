@@ -101,7 +101,9 @@ jobs:
           SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
           echo "SDK=$SDK" >> $GITHUB_ENV
 
-          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+          # Inject /FS into CMake global configs so MSVC always writes PDB synchronously without crashing
+          CMAKE_MSVC_FILE="$PROGRAMFILES/CMake/share/cmake-"*"/Modules/Platform/Windows-MSVC.cmake"
+          sed -i 's/\/Zi/\/Zi \/FS/g' $CMAKE_MSVC_FILE
 
           echo "$(sha256sum "$TBUILD/tdesktop/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
@@ -154,7 +156,6 @@ jobs:
 
       - name: Build Libraries
         run: |
-          set CL=/FS
           %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
 
       - name: Generate stub private headers
