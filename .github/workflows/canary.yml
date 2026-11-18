@@ -51,15 +51,14 @@ jobs:
           echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
           echo REPO_NAME=tdesktop>>%GITHUB_ENV%
 
-      # Determine target repository based on user choice
       - name: Resolve target repository
         shell: bash
         run: |
           if [ "${{ github.event.inputs.source_repo }}" = "upstream" ]; then
-            echo "TARGET_REPO=telegramdesktop/tdesktop" >> $GITHUB_ENV
+            echo "TARGET_REPO=telegramdesktop/tdesktop" >> "$GITHUB_ENV"
             echo "Fetching latest changes from official tdesktop: ${{ github.event.inputs.branch }}"
           else
-            echo "TARGET_REPO=${{ github.repository }}" >> $GITHUB_ENV
+            echo "TARGET_REPO=${{ github.repository }}" >> "$GITHUB_ENV"
             echo "Fetching changes from your own repository: ${{ github.event.inputs.branch }}"
           fi
 
@@ -68,7 +67,7 @@ jobs:
         with:
           repository: ${{ env.TARGET_REPO }}
           ref: ${{ github.event.inputs.branch }}
-          path: ${{ env.TBUILD }}\tdesktop
+          path: TBuild/tdesktop
           fetch-depth: 0
 
       - name: Checkout submodules
@@ -82,16 +81,16 @@ jobs:
         shell: bash
         run: |
           while IFS=' ' read -r name value; do
-            [ "$name" = "AppVersion" ] && echo "BASE_VERSION=$value" >> $GITHUB_ENV
-            [ "$name" = "AppVersionStr" ] && echo "VERSION_STR=$value" >> $GITHUB_ENV
+            [ "$name" = "AppVersion" ] && echo "BASE_VERSION=$value" >> "$GITHUB_ENV"
+            [ "$name" = "AppVersionStr" ] && echo "VERSION_STR=$value" >> "$GITHUB_ENV"
           done < "$TBUILD/tdesktop/Telegram/build/version"
-          
+
           COMMIT_HASH=$(git -C "$TBUILD/tdesktop" rev-parse --short HEAD)
           TAG_NAME="v${VERSION_STR}-${COMMIT_HASH}"
-          
-          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "version_str=$VERSION_STR" >> $GITHUB_OUTPUT
-          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_str=$VERSION_STR" >> "$GITHUB_OUTPUT"
+          echo "commit_hash=$COMMIT_HASH" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION_STR ($TAG_NAME)"
 
       - name: Configure Git and calculate cache key
@@ -99,15 +98,14 @@ jobs:
         run: |
           DOCPATH="$TBUILD/tdesktop/docs/building-win.md"
           SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
-          echo "SDK=$SDK" >> $GITHUB_ENV
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
 
-          # Inject /FS into CMake global configs so MSVC always writes PDB synchronously without crashing
-          CMAKE_MSVC_FILE="$PROGRAMFILES/CMake/share/cmake-"*"/Modules/Platform/Windows-MSVC.cmake"
-          sed -i 's/\/Zi/\/Zi \/FS/g' $CMAKE_MSVC_FILE
+          # Do not rewrite CMake's Windows-MSVC.cmake to inject /FS.
+          # /FS is not a complete fix for PDB sharing/locking problems.
 
           echo "$(sha256sum "$TBUILD/tdesktop/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
 
           git config --global user.email "ci@telegram.desktop"
           git config --global user.name "CI Builder"
@@ -123,11 +121,21 @@ jobs:
           $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
 
           if ($path) {
-            $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory | Where-Object { $_.Name -like '14.44.*' } | Sort-Object Name -Descending | Select-Object -First 1
+            $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory |
+              Where-Object { $_.Name -like '14.44.*' } |
+              Sort-Object Name -Descending |
+              Select-Object -First 1
+
             if ($toolset) {
               $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
               if (-not (Test-Path $header)) {
-                Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @('modify', '--installPath', "`"$path`"", '--add', $atlComponent, '--quiet', '--norestart', '--nocache')
+                $result = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+                  'modify', '--installPath', "`"$path`"", '--add', $atlComponent,
+                  '--quiet', '--norestart', '--nocache'
+                )
+                if ($result.ExitCode -ne 0) {
+                  throw "Visual Studio ATL installation failed with exit code $($result.ExitCode)"
+                }
               }
             }
           }
@@ -144,19 +152,117 @@ jobs:
         with:
           path: ${{ env.TBUILD }}\ThirdParty
           key: ${{ runner.OS }}-x64-third-party-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-x64-third-party-
+          restore-keys: |
+            ${{ runner.OS }}-x64-third-party-
 
+      # Deliberately use a new cache namespace and no restore-keys for one clean
+      # Qt-library rebuild. This avoids restoring an older PDB/build tree.
       - name: Libraries cache
         id: cache-libs
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}
-          key: ${{ runner.OS }}-x64-rel-libs-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-x64-rel-libs-
+          key: ${{ runner.OS }}-x64-rel-libs-${{ env.CACHE_KEY }}-pdb-monitor-v1
+
+      - name: Start disk space monitor
+        id: disk-monitor-start
+        shell: pwsh
+        run: |
+          $monitorScript = Join-Path $env:RUNNER_TEMP 'disk-monitor.ps1'
+          $logPath = Join-Path $env:RUNNER_TEMP 'disk-monitor.log'
+          $stopPath = Join-Path $env:RUNNER_TEMP 'disk-monitor.stop'
+
+          Remove-Item $logPath, $stopPath -Force -ErrorAction SilentlyContinue
+
+          @'
+          param(
+            [Parameter(Mandatory=$true)][string]$LogPath,
+            [Parameter(Mandatory=$true)][string]$StopPath
+          )
+
+          "timestamp_utc,drive,free_gb,total_gb" | Set-Content -LiteralPath $LogPath
+
+          while (-not (Test-Path -LiteralPath $StopPath)) {
+            $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
+
+            foreach ($drive in $drives) {
+              $freeGB = [math]::Round($drive.FreeSpace / 1GB, 2)
+              $totalGB = [math]::Round($drive.Size / 1GB, 2)
+              $line = "$timestamp,$($drive.DeviceID),$freeGB,$totalGB"
+              Add-Content -LiteralPath $LogPath -Value $line
+            }
+
+            Start-Sleep -Seconds 10
+          }
+          '@ | Set-Content -LiteralPath $monitorScript -Encoding UTF8
+
+          $process = Start-Process -FilePath 'pwsh' `
+            -ArgumentList @(
+              '-NoProfile',
+              '-ExecutionPolicy', 'Bypass',
+              '-File', "`"$monitorScript`"",
+              '-LogPath', "`"$logPath`"",
+              '-StopPath', "`"$stopPath`""
+            ) `
+            -PassThru `
+            -WindowStyle Hidden
+
+          "DISK_MONITOR_PID=$($process.Id)" >> $env:GITHUB_ENV
+          "DISK_MONITOR_LOG=$logPath" >> $env:GITHUB_ENV
+          "DISK_MONITOR_STOP=$stopPath" >> $env:GITHUB_ENV
+
+          Start-Sleep -Seconds 2
+          if ($process.HasExited) {
+            throw "Disk monitor exited unexpectedly. Check $logPath"
+          }
+
+          Write-Host "Disk monitor started (PID: $($process.Id)); sampling fixed drives every 10 seconds."
 
       - name: Build Libraries
+        env:
+          # win.bat invokes cmake --build without a --parallel argument.
+          # This environment variable limits those builds to two jobs.
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
         run: |
           %TBUILD%\tdesktop\Telegram\build\prepare\win.bat silent
+
+      - name: Stop disk monitor and publish disk report
+        if: always()
+        shell: pwsh
+        run: |
+          $stopPath = $env:DISK_MONITOR_STOP
+          $logPath = $env:DISK_MONITOR_LOG
+          $pidValue = $env:DISK_MONITOR_PID
+
+          if ($stopPath) {
+            New-Item -ItemType File -Path $stopPath -Force | Out-Null
+          }
+
+          if ($pidValue) {
+            $monitor = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
+            if ($monitor) {
+              Wait-Process -Id ([int]$pidValue) -Timeout 15 -ErrorAction SilentlyContinue
+              Stop-Process -Id ([int]$pidValue) -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+            Write-Host "===== Disk usage samples (UTC, every 10 seconds) ====="
+            Get-Content -LiteralPath $logPath
+
+            $samples = Import-Csv -LiteralPath $logPath
+            $cSamples = @($samples | Where-Object { $_.drive -eq 'C:' })
+            if ($cSamples.Count -gt 0) {
+              $minimum = ($cSamples | Measure-Object -Property free_gb -Minimum).Minimum
+              $latest = $cSamples[-1].free_gb
+              Write-Host "===== Disk summary ====="
+              Write-Host "C: minimum free space during monitored build: $minimum GB"
+              Write-Host "C: last recorded free space: $latest GB"
+            }
+          } else {
+            Write-Warning "Disk monitor log was not found."
+          }
 
       - name: Generate stub private headers
         shell: bash
@@ -198,10 +304,10 @@ jobs:
           mkdir -p TelegramPortable/TelegramForcePortable
           touch TelegramPortable/TelegramForcePortable/.keep
           cp Telegram.exe TelegramPortable/
-          
+
           ARCHIVE_NAME="Telegram-Windows-x64-${{ steps.get_version.outputs.version_str }}-${{ steps.get_version.outputs.commit_hash }}.zip"
           7z a -mx9 "$ARCHIVE_NAME" TelegramPortable
-          
+
           mkdir -p "$GITHUB_WORKSPACE/dist"
           mv "$ARCHIVE_NAME" "$GITHUB_WORKSPACE/dist/"
           mv Telegram.exe "$GITHUB_WORKSPACE/dist/Telegram.exe"
